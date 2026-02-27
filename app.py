@@ -31,7 +31,7 @@ swagger = Swagger(app, config=swagger_config)
 # Configuração de CORS
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001"],
+        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001", "https://frontend-xi-eight-69.vercel.app"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
