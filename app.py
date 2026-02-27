@@ -125,11 +125,14 @@ def cadastro_usuario():
     if existente.data:
         return jsonify({"mensagem": "Email já cadastrado!", "status": "error"}), 400
     
+    agora = datetime.utcnow().isoformat()
     novo_usuario = {
         'name': nome,
         'email': email,
         'usualidade': usualidade,
-        'api_key': generate_unique_api_key()
+        'api_key': generate_unique_api_key(),
+        'created_at': agora,
+        'last_used_at': agora
     }
     
     supabase.table('user').insert(novo_usuario).execute()
@@ -182,6 +185,7 @@ def get_modelos():
 # --- DADOS PRINCIPAIS ---
 
 @app.route('/original')
+@require_api_key
 def get_original():
     query = supabase.table('tabua_original').select('*', count='exact')
 
@@ -231,6 +235,7 @@ def get_tabua_projecoes():
     return jsonify(format_paginated_response(response, page, per_page))
 
 @app.route('/metricas')
+@require_api_key
 def get_metricas_erro():
     query = supabase.table('metricas_erro').select('*', count='exact')
     
@@ -242,6 +247,7 @@ def get_metricas_erro():
     return jsonify(format_paginated_response(response, page, per_page))
 
 @app.route('/sigerip/tabua-mortalidade', methods=['GET'])
+@require_api_key
 def get_tabua_mortalidade_join():
     # Usando inner join do Supabase para filtrar pelas tabelas relacionadas
     query = supabase.table('tabua_original').select(
@@ -287,6 +293,7 @@ def get_tabua_mortalidade_join():
     })
 
 @app.route('/nacoes_unidas')
+@require_api_key
 def get_nacoes_unidas():
     query = supabase.table('nacoes_unidas').select('*', count='exact')
 
