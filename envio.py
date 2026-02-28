@@ -3,7 +3,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
 
-def enviar_email_boas_vindas(email_destino, token_gerado):
+def enviar_email_boas_vindas(email_destino, token_gerado, nome):
     # Puxa as credenciais das variáveis de ambiente (nunca deixe senhas soltas no código!)
     email_remetente = os.environ.get("EMAIL_REMETENTE")
     senha_remetente = os.environ.get("SENHA_EMAIL_APP")
@@ -12,13 +12,13 @@ def enviar_email_boas_vindas(email_destino, token_gerado):
     msg = MIMEMultipart()
     msg['From'] = email_remetente
     msg['To'] = email_destino
-    msg['Subject'] = "Sua Chave de API - Bem-vindo ao SIGERIP!"
+    msg['Subject'] = f"Sua Chave de API - Bem-vindo {nome}!"
 
     # Cria o texto personalizado (usando HTML para ficar bem formatado)
     corpo_email = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-        <h2>Olá! Obrigado por se cadastrar.</h2>
+        <h2>Olá {nome}! Obrigado por se cadastrar.</h2>
         <p>Sua conta foi criada com sucesso. Abaixo está a sua chave de acesso (Token) exclusiva para utilizar a nossa API:</p>
         
         <div style="background-color: #f4f4f4; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 16px; margin: 20px 0;">
@@ -51,19 +51,19 @@ def enviar_email_boas_vindas(email_destino, token_gerado):
         print(f"Erro ao enviar e-mail: {e}")
         return False
     
-def reenviar_email_token(email_destino, token_recuperado):
+def reenviar_email_token(email_destino, token_recuperado,nome):
     email_remetente = os.environ.get("EMAIL_REMETENTE")
     senha_remetente = os.environ.get("SENHA_EMAIL_APP")
 
     msg = MIMEMultipart()
     msg['From'] = email_remetente
     msg['To'] = email_destino
-    msg['Subject'] = "Recuperação de Chave de API - SIGERIP"
+    msg['Subject'] = "Recuperação de Chave de API - Observatório de Inteligência Atuarial"
 
     corpo_email = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-        <h2>Olá novamente!</h2>
+        <h2>Olá novamente {nome}!</h2>
         <p>Notamos que você tentou se cadastrar, mas este e-mail já possui uma conta ativa em nosso sistema.</p>
         <p>Como medida de segurança e para facilitar o seu acesso, estamos reenviando a sua chave de API (Token) atual:</p>
         

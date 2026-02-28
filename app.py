@@ -140,6 +140,7 @@ def cadastro_usuario():
     nome = data.get('nome')
     email = data.get('email').lower()
     usualidade = data.get('uso')
+    descricao = data.get('descricao')
 
     if not nome or not email:
         return jsonify({"mensagem": "Nome e email são obrigatórios!", "status": "error"}), 400
@@ -149,7 +150,7 @@ def cadastro_usuario():
     if existente.data:
         token_antigo = existente.data[0]['api_key']
 
-        email_enviado = reenviar_email_token(email, token_antigo)
+        email_enviado = reenviar_email_token(email, token_antigo,nome.split()[0])
         
         if email_enviado:
             return jsonify({"mensagem": "E-mail já cadastrado. Reenviamos o seu token para a caixa de entrada!"}), 200
@@ -163,11 +164,12 @@ def cadastro_usuario():
         'usualidade': usualidade,
         'api_key': generate_unique_api_key(),
         'created_at': agora,
-        'last_used_at': agora
+        'last_used_at': agora,
+        'instituicao_descricao': descricao
     }
     
     supabase.table('user').insert(novo_usuario).execute()
-    email_enviado = enviar_email_boas_vindas(email, novo_usuario['api_key'])
+    email_enviado = enviar_email_boas_vindas(email, novo_usuario['api_key'], nome.split()[0])
 
     if email_enviado:
         return jsonify({"mensagem": "Cadastro realizado! Verifique seu e-mail para pegar o token."}), 201
