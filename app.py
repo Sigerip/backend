@@ -7,6 +7,9 @@ import secrets
 from functools import wraps
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from envio import enviar_email_boas_vindas, reenviar_email_token
 
 # ============================================
 # CONFIGURAÇÕES INICIAIS
@@ -45,6 +48,27 @@ supabase: Client = create_client(supabase_url, supabase_key)
 # ============================================
 # FUNÇÕES AUXILIARES
 # ============================================
+
+# Limitando a 20 requisições por minuto por usuário (identificado por API Key ou IP)
+def identificar_usuario():
+    token = request.headers.get("Authorization")
+    if token:
+        return token
+    
+    return get_remote_address()
+
+limiter = Limiter(
+    key_func=identificar_usuario,
+    app=app,
+    default_limits=["20 per minute"]
+)
+
+@app.errorhandler(429)
+def limite_excedido(e):
+    return jsonify({
+        "erro": "Limite de requisições excedido.",
+        "detalhes": "Você só pode fazer 20 requisições por minuto. Aguarde um momento."
+    }), 429
 
 def generate_unique_api_key():
     while True:
@@ -123,7 +147,14 @@ def cadastro_usuario():
     # Verifica email duplicado
     existente = supabase.table('user').select('*').eq('email', email).execute()
     if existente.data:
-        return jsonify({"mensagem": "Email já cadastrado!", "status": "error"}), 400
+        token_antigo = existente.data[0]['api_key'] 
+
+        email_enviado = reenviar_email_token(email, token_antigo)
+        
+        if email_enviado:
+            return jsonify({"mensagem": "E-mail já cadastrado. Reenviamos o seu token para a caixa de entrada!"}), 200
+        else:
+            return jsonify({"erro": "Erro ao reenviar o e-mail de recuperação."}), 500
     
     agora = datetime.utcnow().isoformat()
     novo_usuario = {
@@ -136,7 +167,12 @@ def cadastro_usuario():
     }
     
     supabase.table('user').insert(novo_usuario).execute()
-    return jsonify({"mensagem": "Usuário cadastrado com sucesso!", "status": "sucesso"}), 201
+    email_enviado = enviar_email_boas_vindas(email, novo_usuario['api_key'])
+
+    if email_enviado:
+        return jsonify({"mensagem": "Cadastro realizado! Verifique seu e-mail para pegar o token."}), 201
+    
+    return jsonify({"erro": "Cadastro feito, mas houve um erro ao enviar o e-mail."}), 500
 
 @app.route('/')
 def list_routes():
