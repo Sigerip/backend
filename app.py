@@ -138,7 +138,7 @@ def format_paginated_response(response, page, per_page):
 def cadastro_usuario():
     data = request.get_json()
     nome = data.get('nome')
-    email = data.get('email')
+    email = data.get('email').lower()
     usualidade = data.get('uso')
 
     if not nome or not email:
@@ -147,7 +147,7 @@ def cadastro_usuario():
     # Verifica email duplicado
     existente = supabase.table('user').select('*').eq('email', email).execute()
     if existente.data:
-        token_antigo = existente.data[0]['api_key'] 
+        token_antigo = existente.data[0]['api_key']
 
         email_enviado = reenviar_email_token(email, token_antigo)
         
