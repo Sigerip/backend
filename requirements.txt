@@ -1,6 +1,5 @@
 flask
 flask-cors
-flasgger
 python-dotenv
 supabase
 flask-limiter
