@@ -6,3 +6,4 @@ supabase
 flask-limiter
 pandas
 psycopg2-binary
+pyarrow
