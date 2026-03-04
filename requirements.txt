@@ -1,6 +1,8 @@
-Flask
-Flask-Cors
+flask
+flask-cors
 flasgger
 python-dotenv
 supabase
-Flask-Limiter
+flask-limiter
+pandas
+psycopg2-binary

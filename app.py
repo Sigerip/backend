@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, g
+from flask import Flask, jsonify, request, g, send_file
 from flask_cors import CORS
 from flasgger import Swagger, swag_from
 import os
@@ -11,9 +11,10 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from envio import enviar_email_boas_vindas, reenviar_email_token
 import time
-from functools import wraps
-from flask import request, jsonify, g
-from datetime import datetime
+import io
+import pandas as pd
+import psycopg2
+
 
 API_KEY_CACHE = {}
 
@@ -40,6 +41,7 @@ CORS(app, resources={
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
+supabase_uri = os.environ.get("SUPABASE_URI")
 
 # ============================================
 # FUNÇÕES AUXILIARES
@@ -156,6 +158,39 @@ def format_paginated_response(response, page, per_page):
 # ROTAS DA API
 # ============================================
 
+# Puxar dados completos da api
+@app.route('/oiatuarial_api/<tabela>')
+@require_api_key
+def exportar_parquet_dinamico(tabela):
+
+    tabelas_permitidas = ['tabua_original', 'tabuas_previsoes', 'metricas_erro', 'nacoes_unidas']
+    if tabela not in tabelas_permitidas:
+        return jsonify({"erro": "Tabela inválida"}), 400
+
+    try:
+        conn = psycopg2.connect(supabase_uri)
+
+        query = f"SELECT * FROM {tabela}"
+
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        buffer = io.BytesIO()
+        
+        df.to_parquet(buffer, index=False, engine='pyarrow')
+
+        buffer.seek(0)
+
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=f"{tabela}.parquet",
+            mimetype='application/octet-stream'
+        )
+        
+    except Exception as e:
+        return jsonify({"erro": f"Falha ao gerar Parquet: {str(e)}"}), 500
+
 @app.route('/cadastro', methods=['POST'])
 def cadastro_usuario():
     data = request.get_json()
@@ -260,7 +295,7 @@ def get_original():
     query = query.order('ano').order('id_faixa')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
     
     response = query.range(start, end).execute()
@@ -286,7 +321,7 @@ def get_tabua_projecoes():
     query = query.order('ano')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
     
     response = query.range(start, end).execute()
@@ -298,7 +333,7 @@ def get_metricas_erro():
     query = supabase.table('metricas_erro').select('*', count='estimated')
     
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
     
     response = query.range(start, end).execute()
@@ -320,7 +355,7 @@ def get_nacoes_unidas():
     if faixa_etaria: query = query.eq('faixa_etaria', faixa_etaria)
     
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
     
     response = query.range(start, end).execute()
