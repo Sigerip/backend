@@ -160,7 +160,7 @@ def format_paginated_response(response, page, per_page):
 # ============================================
 
 # Puxar dados completos da api
-@app.route('/oiatuarial_api/link/<tabela>')
+@app.route('/oiatuarial_api/<tabela>')
 @require_api_key
 def obter_link_tabela(tabela):
 
@@ -169,7 +169,7 @@ def obter_link_tabela(tabela):
     if tabela not in tabelas_permitidas:
         return jsonify({"erro": "Tabela inválida"}), 400
 
-    link_direto = f"{url_tables}/{tabela}.parquet"
+    link_direto = f"{url_tables}{tabela}.parquet"
     print(link_direto)
 
     # Retorna o link em formato JSON
