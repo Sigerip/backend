@@ -11,9 +11,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from envio import enviar_email_boas_vindas, reenviar_email_token
 import time
-import io
-import pandas as pd
-import psycopg2
+from sqlalchemy import create_engine
 
 
 API_KEY_CACHE = {}
@@ -42,7 +40,10 @@ supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 supabase_uri = os.environ.get("SUPABASE_URI")
+url_tables = os.environ.get("TABLES")
 
+url_sqlalchemy = supabase_uri.replace("postgres://", "postgresql://")
+engine = create_engine(url_sqlalchemy)
 # ============================================
 # FUNÇÕES AUXILIARES
 # ============================================
@@ -159,37 +160,25 @@ def format_paginated_response(response, page, per_page):
 # ============================================
 
 # Puxar dados completos da api
-@app.route('/oiatuarial_api/<tabela>')
+@app.route('/oiatuarial_api/link/<tabela>')
 @require_api_key
-def exportar_parquet_dinamico(tabela):
+def obter_link_tabela(tabela):
 
-    tabelas_permitidas = ['tabua_original', 'tabuas_previsoes', 'metricas_erro', 'nacoes_unidas']
+    tabelas_permitidas = ['dados_mortalidade1', 'projecoes', 'metricas_erro', 'nacoes_unidas']
+    
     if tabela not in tabelas_permitidas:
         return jsonify({"erro": "Tabela inválida"}), 400
 
-    try:
-        conn = psycopg2.connect(supabase_uri)
+    link_direto = f"{url_tables}{tabela}.parquet"
+    print(link_direto)
 
-        query = f"SELECT * FROM {tabela}"
-
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-
-        buffer = io.BytesIO()
-        
-        df.to_parquet(buffer, index=False, engine='pyarrow')
-
-        buffer.seek(0)
-
-        return send_file(
-            buffer,
-            as_attachment=True,
-            download_name=f"{tabela}.parquet",
-            mimetype='application/octet-stream'
-        )
-        
-    except Exception as e:
-        return jsonify({"erro": f"Falha ao gerar Parquet: {str(e)}"}), 500
+    # Retorna o link em formato JSON
+    return jsonify({
+        "status": "sucesso",
+        "tabela": tabela,
+        "url_download": link_direto,
+        "mensagem": "Use este link no pandas.read_parquet() para baixar os dados."
+    }), 200
 
 @app.route('/cadastro', methods=['POST'])
 def cadastro_usuario():
