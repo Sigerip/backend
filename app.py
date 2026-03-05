@@ -1,6 +1,6 @@
-from flask import Flask, jsonify, request, g, send_file
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
-from flasgger import Swagger, swag_from
+from flasgger import Swagger
 import os
 from datetime import datetime
 import secrets
@@ -10,14 +10,6 @@ from supabase import create_client, Client
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from envio import enviar_email_boas_vindas, reenviar_email_token
-import time
-from sqlalchemy import create_engine
-
-
-API_KEY_CACHE = {}
-
-TTL_VALIDACAO_SEGUNDOS = 300
-INTERVALO_UPDATE_BD = 3600
 
 # ============================================
 # CONFIGURAÇÕES INICIAIS
@@ -39,11 +31,8 @@ CORS(app, resources={
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
-supabase_uri = os.environ.get("SUPABASE_URI")
 url_tables = os.environ.get("TABLES")
 
-url_sqlalchemy = supabase_uri.replace("postgres://", "postgresql://")
-engine = create_engine(url_sqlalchemy)
 # ============================================
 # FUNÇÕES AUXILIARES
 # ============================================
@@ -53,7 +42,7 @@ def identificar_usuario():
     token = request.headers.get("Authorization")
     if token:
         return token
-    
+
     return get_remote_address()
 
 limiter = Limiter(
@@ -82,59 +71,33 @@ def require_api_key(f):
     def decorated(*args, **kwargs):
         api_key = None
         auth_header = request.headers.get('Authorization')
-        
+
         if auth_header and auth_header.startswith('Bearer '):
             parts = auth_header.split(' ')
             if len(parts) == 2:
                 api_key = parts[1]
-        
+
         if not api_key:
             api_key = request.args.get('api_key')
 
         if not api_key:
             return jsonify({'error': 'Chave de API ausente'}), 401
 
-        agora = time.time()
-        usuario = None
-        precisa_validar_banco = True
-        
-        # 1. TENTA PEGAR DO CACHE EM MEMÓRIA
-        cache_entry = API_KEY_CACHE.get(api_key)
-        if cache_entry and (agora - cache_entry['ultima_validacao'] < TTL_VALIDACAO_SEGUNDOS):
-            usuario = cache_entry['user']
-            precisa_validar_banco = False
+        # Busca o usuário no Supabase
+        response = supabase.table('user').select('*').eq('api_key', api_key).execute()
 
-        # 2. SE NÃO ESTÁ NO CACHE OU EXPIROU, VAI NO SUPABASE (SELECT)
-        if precisa_validar_banco:
-            response = supabase.table('user').select('*').eq('api_key', api_key).execute()
-            
-            if not response.data:
-                return jsonify({'error': 'Chave de API inválida'}), 401
-            
-            usuario = response.data[0]
-            
-            # Salva ou atualiza a chave no cache
-            API_KEY_CACHE[api_key] = {
-                'user': usuario,
-                'ultima_validacao': agora,
-                # Mantém o histórico do último update se já existir no cache, senão zera
-                'ultimo_update_bd': cache_entry['ultimo_update_bd'] if cache_entry else 0
-            }
-            cache_entry = API_KEY_CACHE[api_key]
+        if not response.data:
+            return jsonify({'error': 'Chave de API inválida'}), 401
 
-        # 3. ATUALIZA O 'last_used_at' NO BANCO (UPDATE COM THROTTLING)
-        # Só faz o update se passou mais de 1 hora (3600s) desde o último
-        if agora - cache_entry['ultimo_update_bd'] > INTERVALO_UPDATE_BD:
-            try:
-                data_iso = datetime.utcnow().isoformat()
-                supabase.table('user').update({'last_used_at': data_iso}).eq('id', usuario['id']).execute()
-                
-                # Registra no cache que acabamos de atualizar o banco
-                API_KEY_CACHE[api_key]['ultimo_update_bd'] = agora
-            except Exception as e:
-                print(f"Erro ao atualizar uso: {e}")
-        
-        g.current_user = usuario
+        user = response.data[0]
+
+        # Atualiza o último uso
+        try:
+            supabase.table('user').update({'last_used_at': datetime.utcnow().isoformat()}).eq('id', user['id']).execute()
+        except Exception as e:
+            print(f"Erro ao atualizar uso: {e}")
+
+        g.current_user = user
         return f(*args, **kwargs)
     return decorated
 
@@ -190,19 +153,19 @@ def cadastro_usuario():
 
     if not nome or not email:
         return jsonify({"mensagem": "Nome e email são obrigatórios!", "status": "error"}), 400
-    
+
     # Verifica email duplicado
     existente = supabase.table('user').select('*').eq('email', email).execute()
     if existente.data:
         token_antigo = existente.data[0]['api_key']
 
-        email_enviado = reenviar_email_token(email, token_antigo,nome.split()[0].capitalize())
-        
+        email_enviado = reenviar_email_token(email, token_antigo,nome.split()[0])
+
         if email_enviado:
             return jsonify({"mensagem": "E-mail já cadastrado. Reenviamos o seu token para a caixa de entrada!"}), 200
         else:
             return jsonify({"erro": "Erro ao reenviar o e-mail de recuperação."}), 500
-    
+
     agora = datetime.utcnow().isoformat()
     novo_usuario = {
         'name': nome,
@@ -213,13 +176,13 @@ def cadastro_usuario():
         'last_used_at': agora,
         'instituicao_descricao': descricao
     }
-    
+
     supabase.table('user').insert(novo_usuario).execute()
-    email_enviado = enviar_email_boas_vindas(email, novo_usuario['api_key'], nome.split()[0].capitalize())
+    email_enviado = enviar_email_boas_vindas(email, novo_usuario['api_key'], nome.split()[0])
 
     if email_enviado:
         return jsonify({"mensagem": "Cadastro realizado! Verifique seu e-mail para pegar o token."}), 201
-    
+
     return jsonify({"erro": "Cadastro feito, mas houve um erro ao enviar o e-mail."}), 500
 
 @app.route('/')
@@ -236,13 +199,15 @@ def list_routes():
 @app.route('/dimensoes/anos_original')
 def get_anos_original():
     # Supabase não tem um comando nativo .distinct() fácil via API, então agrupamos no Python
-    response = supabase.rpc('get_anos_originais_unicos').execute()
-    return jsonify([item['ano'] for item in response.data])
+    response = supabase.table('tabua_original').select('ano').execute()
+    anos = sorted(list(set([item['ano'] for item in response.data if item['ano'] is not None])))
+    return jsonify(anos)
 
 @app.route('/dimensoes/anos_projecoes')
 def get_anos_projecoes():
-    response = supabase.rpc('get_anos_previsoes_unicos').execute()
-    return jsonify([item['ano'] for item in response.data])
+    response = supabase.table('tabuas_previsoes').select('ano').execute()
+    anos = sorted(list(set([item['ano'] for item in response.data if item['ano'] is not None])))
+    return jsonify(anos)
 
 @app.route('/dimensoes/locais')
 def get_locais():
@@ -269,7 +234,7 @@ def get_modelos():
 @app.route('/original')
 @require_api_key
 def get_original():
-    query = supabase.table('tabua_original').select('*', count='estimated')
+    query = supabase.table('tabua_original').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
     sexo = request.args.get('sexo', type=int)
@@ -280,20 +245,20 @@ def get_original():
     if sexo: query = query.eq('id_sexo', sexo)
     if local: query = query.eq('id_local', local)
     if faixa: query = query.eq('id_faixa', faixa)
-    
+
     query = query.order('ano').order('id_faixa')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 1000, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
     start, end = get_pagination_params(page, per_page)
-    
+
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
 
 @app.route('/previsoes')
 @require_api_key
 def get_tabua_projecoes():
-    query = supabase.table('tabuas_previsoes').select('*', count='estimated')
+    query = supabase.table('tabuas_previsoes').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
     sexo = request.args.get('sexo', type=int)
@@ -306,32 +271,78 @@ def get_tabua_projecoes():
     if local: query = query.eq('id_local', local)
     if faixa: query = query.eq('id_faixa', faixa)
     if modelo: query = query.eq('id_modelo', modelo)
-    
+
     query = query.order('ano')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 1000, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
     start, end = get_pagination_params(page, per_page)
-    
+
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
 
 @app.route('/metricas')
 @require_api_key
 def get_metricas_erro():
-    query = supabase.table('metricas_erro').select('*', count='estimated')
-    
+    query = supabase.table('metricas_erro').select('*', count='exact')
+
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 1000, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
     start, end = get_pagination_params(page, per_page)
-    
+
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
+
+@app.route('/sigerip/tabua-mortalidade', methods=['GET'])
+@require_api_key
+def get_tabua_mortalidade_join():
+    # Usando inner join do Supabase para filtrar pelas tabelas relacionadas
+    query = supabase.table('tabua_original').select(
+        '*, dim_locais!inner(*), dim_sexo!inner(*), dim_faixas!inner(*)', 
+        count='exact'
+    )
+
+    filtro_local = request.args.get('local')
+    filtro_sexo = request.args.get('sexo')
+    filtro_faixa = request.args.get('faixa')
+    filtro_ano = request.args.get('ano', type=int)
+
+    if filtro_local:
+        query = query.eq('dim_locais.nome_local', filtro_local)
+    if filtro_sexo:
+        query = query.eq('dim_sexo.descricao', filtro_sexo)
+    if filtro_faixa:
+        query = query.eq('dim_faixas.descricao', filtro_faixa)
+    if filtro_ano:
+        query = query.eq('ano', filtro_ano)
+
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
+    start, end = get_pagination_params(page, per_page)
+
+    response = query.range(start, end).execute()
+
+    # Limpando a resposta para não enviar as tabelas aninhadas inteiras no JSON final
+    dados_limpos = []
+    for item in response.data:
+        # Remove os nós extras criados pelo join
+        item.pop('dim_locais', None)
+        item.pop('dim_sexo', None)
+        item.pop('dim_faixas', None)
+        dados_limpos.append(item)
+
+    return jsonify({
+        'data': dados_limpos,
+        'total': response.count,
+        'page': page,
+        'per_page': per_page,
+        'pages': (response.count + per_page - 1) // per_page if response.count else 0
+    })
 
 @app.route('/nacoes_unidas')
 @require_api_key
 def get_nacoes_unidas():
-    query = supabase.table('nacoes_unidas').select('*', count='estimated')
+    query = supabase.table('nacoes_unidas').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
     sexo = request.args.get('sexo', type=str)
@@ -342,11 +353,11 @@ def get_nacoes_unidas():
     if sexo: query = query.eq('sexo', sexo)
     if local: query = query.eq('local', local)
     if faixa_etaria: query = query.eq('faixa_etaria', faixa_etaria)
-    
+
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 1000, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
     start, end = get_pagination_params(page, per_page)
-    
+
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
 
@@ -356,5 +367,4 @@ def get_nacoes_unidas():
 
 if __name__ == '__main__':
     print(f"API rodando em: http://0.0.0.0:8001")
-    print(f"Documentação Swagger: http://localhost:8001/docs/")
     app.run(host='0.0.0.0', port=8001, debug=True)
