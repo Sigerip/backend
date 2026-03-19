@@ -21,11 +21,85 @@ app = Flask(__name__)
 # Configuração de CORS
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001", "https://frontend-xi-eight-69.vercel.app"],
+        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001", "https://oiatuarial.vercel.app"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
+
+# ============================================
+# CONFIGURAÇÃO DO SWAGGER
+# ============================================
+swagger_config = {
+    "headers": [],
+    "specs": [
+        {
+            "endpoint": "apispec",
+            "route": "/apispec.json",
+            "rule_filter": lambda rule: True,
+            "model_filter": lambda tag: True,
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
+
+swagger_template = {
+    "swagger": "2.0",
+    "info": {
+        "title": "OiAtuarial API",
+        "description": (
+            "API de dados atuariais do projeto **OiAtuarial**.\n\n"
+            "Fornece acesso a tábuas de mortalidade originais, projeções de mortalidade, "
+            "métricas de erro dos modelos preditivos e dados das Nações Unidas.\n\n"
+            "### Autenticação\n"
+            "Endpoints protegidos exigem uma **API Key** enviada via:\n"
+            "- Header `Authorization: Bearer <sua_api_key>`\n"
+            "- Query parameter `?api_key=<sua_api_key>`\n\n"
+            "### Rate Limiting\n"
+            "Limite de **20 requisições por minuto** por usuário."
+        ),
+        "version": "1.0.0",
+        "contact": {
+            "name": "Equipe OiAtuarial"
+        }
+    },
+    "basePath": "/",
+    "schemes": ["http", "https"],
+    "securityDefinitions": {
+        "Bearer": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header",
+            "description": "Insira: **Bearer &lt;sua_api_key&gt;**"
+        }
+    },
+    "tags": [
+        {
+            "name": "Autenticação",
+            "description": "Cadastro de usuários e obtenção de API Key"
+        },
+        {
+            "name": "Dados via Parquet",
+            "description": "Download de dados completos em formato Parquet"
+        },
+        {
+            "name": "Dimensões",
+            "description": "Tabelas de dimensão para filtros (anos, locais, faixas, sexos, modelos)"
+        },
+        {
+            "name": "Dados Principais",
+            "description": "Consultas paginadas às tábuas de mortalidade e projeções"
+        },
+        {
+            "name": "Utilidades",
+            "description": "Endpoints auxiliares"
+        }
+    ]
+}
+
+swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
 # Inicialização do Supabase
 supabase_url = os.environ.get("SUPABASE_URL")
@@ -122,10 +196,60 @@ def format_paginated_response(response, page, per_page):
 # ROTAS DA API
 # ============================================
 
-# Puxar dados completos da api
+# --- DOWNLOAD DE DADOS COMPLETOS (PARQUET) ---
+
 @app.route('/oiatuarial_api/<tabela>')
 @require_api_key
 def obter_link_tabela(tabela):
+    """
+    Obter link de download de uma tabela completa em Parquet
+    Retorna a URL direta para download do arquivo .parquet da tabela solicitada.
+    Use o link retornado com `pandas.read_parquet()` para carregar os dados.
+    ---
+    tags:
+      - Dados via Parquet
+    security:
+      - Bearer: []
+    parameters:
+      - name: tabela
+        in: path
+        type: string
+        required: true
+        description: Nome da tabela desejada
+        enum:
+          - dados_mortalidade1
+          - projecoes
+          - metricas_erro
+          - nacoes_unidas
+    responses:
+      200:
+        description: Link de download gerado com sucesso
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: sucesso
+            tabela:
+              type: string
+              example: dados_mortalidade1
+            url_download:
+              type: string
+              example: https://exemplo.com/dados_mortalidade1.parquet
+            mensagem:
+              type: string
+              example: "Use este link no pandas.read_parquet() para baixar os dados."
+      400:
+        description: Tabela inválida
+        schema:
+          type: object
+          properties:
+            erro:
+              type: string
+              example: Tabela inválida
+      401:
+        description: Chave de API ausente ou inválida
+    """
 
     tabelas_permitidas = ['dados_mortalidade1', 'projecoes', 'metricas_erro', 'nacoes_unidas']
     
@@ -143,8 +267,74 @@ def obter_link_tabela(tabela):
         "mensagem": "Use este link no pandas.read_parquet() para baixar os dados."
     }), 200
 
+# --- CADASTRO DE USUÁRIO ---
+
 @app.route('/cadastro', methods=['POST'])
 def cadastro_usuario():
+    """
+    Cadastrar novo usuário e obter API Key
+    Registra um novo usuário no sistema. Caso o e-mail já exista, reenvia o token existente.
+    O token de acesso é enviado para o e-mail informado.
+    ---
+    tags:
+      - Autenticação
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - nome
+            - email
+          properties:
+            nome:
+              type: string
+              description: Nome completo do usuário
+              example: João Silva
+            email:
+              type: string
+              description: E-mail do usuário (será normalizado para minúsculo)
+              example: joao@exemplo.com
+            uso:
+              type: string
+              description: Finalidade de uso da API
+              example: Pesquisa acadêmica
+            descricao:
+              type: string
+              description: Descrição da instituição ou projeto
+              example: Universidade Federal - Departamento de Atuária
+    responses:
+      201:
+        description: Cadastro realizado com sucesso
+        schema:
+          type: object
+          properties:
+            mensagem:
+              type: string
+              example: "Cadastro realizado! Verifique seu e-mail para pegar o token."
+      200:
+        description: E-mail já cadastrado — token reenviado
+        schema:
+          type: object
+          properties:
+            mensagem:
+              type: string
+              example: "E-mail já cadastrado. Reenviamos o seu token para a caixa de entrada!"
+      400:
+        description: Dados obrigatórios ausentes
+        schema:
+          type: object
+          properties:
+            mensagem:
+              type: string
+              example: "Nome e email são obrigatórios!"
+            status:
+              type: string
+              example: error
+      500:
+        description: Erro interno ao enviar e-mail
+    """
     data = request.get_json()
     nome = data.get('nome')
     email = data.get('email').lower()
@@ -185,8 +375,23 @@ def cadastro_usuario():
 
     return jsonify({"erro": "Cadastro feito, mas houve um erro ao enviar o e-mail."}), 500
 
+# --- UTILIDADES ---
+
 @app.route('/')
 def list_routes():
+    """
+    Listar todas as rotas disponíveis
+    Retorna uma visão geral de todos os endpoints registrados na API.
+    ---
+    tags:
+      - Utilidades
+    responses:
+      200:
+        description: Lista de rotas em formato texto
+        schema:
+          type: string
+          example: "Endpoint: list_routes | Métodos: [GET] | Caminho: /"
+    """
     output = []
     for rule in app.url_map.iter_rules():
         if rule.endpoint != 'static':
@@ -198,34 +403,147 @@ def list_routes():
 
 @app.route('/dimensoes/anos_original')
 def get_anos_original():
-    # Supabase não tem um comando nativo .distinct() fácil via API, então agrupamos no Python
+    """
+    Listar anos disponíveis (dados originais)
+    Retorna a lista distinta e ordenada de anos presentes na tabela de mortalidade original.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de anos
+        schema:
+          type: array
+          items:
+            type: integer
+          example: [1980, 1991, 2000, 2010, 2022]
+    """
     response = supabase.table('tabua_original').select('ano').execute()
     anos = sorted(list(set([item['ano'] for item in response.data if item['ano'] is not None])))
     return jsonify(anos)
 
 @app.route('/dimensoes/anos_projecoes')
 def get_anos_projecoes():
+    """
+    Listar anos disponíveis (projeções)
+    Retorna a lista distinta e ordenada de anos presentes nas projeções de mortalidade.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de anos das projeções
+        schema:
+          type: array
+          items:
+            type: integer
+          example: [2023, 2024, 2025, 2030, 2040]
+    """
     response = supabase.table('tabuas_previsoes').select('ano').execute()
     anos = sorted(list(set([item['ano'] for item in response.data if item['ano'] is not None])))
     return jsonify(anos)
 
 @app.route('/dimensoes/locais')
 def get_locais():
+    """
+    Listar todos os locais (estados/regiões)
+    Retorna a tabela completa de locais disponíveis no sistema com seus IDs.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de locais
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                example: 1
+              nome_local:
+                type: string
+                example: São Paulo
+    """
     response = supabase.table('dim_locais').select('*').execute()
     return jsonify(response.data)
 
 @app.route('/dimensoes/faixas')
 def get_faixas():
+    """
+    Listar faixas etárias
+    Retorna todas as faixas etárias cadastradas no sistema com seus IDs.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de faixas etárias
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                example: 1
+              descricao:
+                type: string
+                example: "0-4"
+    """
     response = supabase.table('dim_faixas').select('*').execute()
     return jsonify(response.data)
 
 @app.route('/dimensoes/sexos')
 def get_sexos():
+    """
+    Listar categorias de sexo
+    Retorna as categorias de sexo disponíveis no sistema.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de sexos
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                example: 1
+              descricao:
+                type: string
+                example: Masculino
+    """
     response = supabase.table('dim_sexo').select('*').execute()
     return jsonify(response.data)
 
 @app.route('/dimensoes/modelos')
 def get_modelos():
+    """
+    Listar modelos de projeção
+    Retorna os modelos estatísticos utilizados para as projeções de mortalidade.
+    ---
+    tags:
+      - Dimensões
+    responses:
+      200:
+        description: Lista de modelos
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                example: 1
+              descricao:
+                type: string
+                example: Lee-Carter
+    """
     response = supabase.table('dim_modelo').select('*').execute()
     return jsonify(response.data)
 
@@ -234,6 +552,70 @@ def get_modelos():
 @app.route('/original')
 @require_api_key
 def get_original():
+    """
+    Consultar tábua de mortalidade original
+    Retorna dados da tábua de mortalidade original com suporte a filtros e paginação.
+    ---
+    tags:
+      - Dados Principais
+    security:
+      - Bearer: []
+    parameters:
+      - name: ano
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ano
+      - name: sexo
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID do sexo
+      - name: local
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID do local
+      - name: faixa
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID da faixa etária
+      - name: page
+        in: query
+        type: integer
+        required: false
+        default: 1
+        description: Número da página
+      - name: per_page
+        in: query
+        type: integer
+        required: false
+        default: 100
+        description: Registros por página
+    responses:
+      200:
+        description: Dados paginados da tábua original
+        schema:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                type: object
+            total:
+              type: integer
+              description: Total de registros encontrados
+            page:
+              type: integer
+            per_page:
+              type: integer
+            pages:
+              type: integer
+              description: Total de páginas
+      401:
+        description: Chave de API ausente ou inválida
+    """
     query = supabase.table('tabua_original').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
@@ -258,6 +640,73 @@ def get_original():
 @app.route('/previsoes')
 @require_api_key
 def get_tabua_projecoes():
+    """
+    Consultar projeções de mortalidade
+    Retorna dados das projeções de mortalidade geradas pelos modelos estatísticos, com filtros e paginação.
+    ---
+    tags:
+      - Dados Principais
+    security:
+      - Bearer: []
+    parameters:
+      - name: ano
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ano da projeção
+      - name: sexo
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID do sexo
+      - name: local
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID do local
+      - name: faixa
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID da faixa etária
+      - name: modelo
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ID do modelo de projeção
+      - name: page
+        in: query
+        type: integer
+        required: false
+        default: 1
+        description: Número da página
+      - name: per_page
+        in: query
+        type: integer
+        required: false
+        default: 100
+        description: Registros por página
+    responses:
+      200:
+        description: Dados paginados das projeções
+        schema:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                type: object
+            total:
+              type: integer
+            page:
+              type: integer
+            per_page:
+              type: integer
+            pages:
+              type: integer
+      401:
+        description: Chave de API ausente ou inválida
+    """
     query = supabase.table('tabuas_previsoes').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
@@ -284,6 +733,48 @@ def get_tabua_projecoes():
 @app.route('/metricas')
 @require_api_key
 def get_metricas_erro():
+    """
+    Consultar métricas de erro dos modelos
+    Retorna as métricas de avaliação (erro) dos modelos de projeção utilizados, com paginação.
+    ---
+    tags:
+      - Dados Principais
+    security:
+      - Bearer: []
+    parameters:
+      - name: page
+        in: query
+        type: integer
+        required: false
+        default: 1
+        description: Número da página
+      - name: per_page
+        in: query
+        type: integer
+        required: false
+        default: 100
+        description: Registros por página
+    responses:
+      200:
+        description: Métricas de erro paginadas
+        schema:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                type: object
+            total:
+              type: integer
+            page:
+              type: integer
+            per_page:
+              type: integer
+            pages:
+              type: integer
+      401:
+        description: Chave de API ausente ou inválida
+    """
     query = supabase.table('metricas_erro').select('*', count='exact')
 
     page = request.args.get('page', 1, type=int)
@@ -293,55 +784,72 @@ def get_metricas_erro():
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
 
-@app.route('/sigerip/tabua-mortalidade', methods=['GET'])
-@require_api_key
-def get_tabua_mortalidade_join():
-    # Usando inner join do Supabase para filtrar pelas tabelas relacionadas
-    query = supabase.table('tabua_original').select(
-        '*, dim_locais!inner(*), dim_sexo!inner(*), dim_faixas!inner(*)', 
-        count='exact'
-    )
-
-    filtro_local = request.args.get('local')
-    filtro_sexo = request.args.get('sexo')
-    filtro_faixa = request.args.get('faixa')
-    filtro_ano = request.args.get('ano', type=int)
-
-    if filtro_local:
-        query = query.eq('dim_locais.nome_local', filtro_local)
-    if filtro_sexo:
-        query = query.eq('dim_sexo.descricao', filtro_sexo)
-    if filtro_faixa:
-        query = query.eq('dim_faixas.descricao', filtro_faixa)
-    if filtro_ano:
-        query = query.eq('ano', filtro_ano)
-
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
-    start, end = get_pagination_params(page, per_page)
-
-    response = query.range(start, end).execute()
-
-    # Limpando a resposta para não enviar as tabelas aninhadas inteiras no JSON final
-    dados_limpos = []
-    for item in response.data:
-        # Remove os nós extras criados pelo join
-        item.pop('dim_locais', None)
-        item.pop('dim_sexo', None)
-        item.pop('dim_faixas', None)
-        dados_limpos.append(item)
-
-    return jsonify({
-        'data': dados_limpos,
-        'total': response.count,
-        'page': page,
-        'per_page': per_page,
-        'pages': (response.count + per_page - 1) // per_page if response.count else 0
-    })
 
 @app.route('/nacoes_unidas')
 @require_api_key
 def get_nacoes_unidas():
+    """
+    Consultar dados das Nações Unidas
+    Retorna dados de mortalidade provenientes das Nações Unidas, com filtros e paginação.
+    ---
+    tags:
+      - Dados Principais
+    security:
+      - Bearer: []
+    parameters:
+      - name: ano
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por ano
+      - name: sexo
+        in: query
+        type: string
+        required: false
+        description: "Filtrar por sexo (ex: Male, Female)"
+      - name: local
+        in: query
+        type: string
+        required: false
+        description: "Filtrar por local/país"
+      - name: faixa_etaria
+        in: query
+        type: integer
+        required: false
+        description: Filtrar por faixa etária
+      - name: page
+        in: query
+        type: integer
+        required: false
+        default: 1
+        description: Número da página
+      - name: per_page
+        in: query
+        type: integer
+        required: false
+        default: 100
+        description: Registros por página
+    responses:
+      200:
+        description: Dados paginados das Nações Unidas
+        schema:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                type: object
+            total:
+              type: integer
+            page:
+              type: integer
+            per_page:
+              type: integer
+            pages:
+              type: integer
+      401:
+        description: Chave de API ausente ou inválida
+    """
     query = supabase.table('nacoes_unidas').select('*', count='exact')
 
     ano = request.args.get('ano', type=int)
