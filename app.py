@@ -591,7 +591,7 @@ def get_original():
         in: query
         type: integer
         required: false
-        default: 100
+        default: 1000
         description: Registros por página
     responses:
       200:
@@ -631,7 +631,7 @@ def get_original():
     query = query.order('ano').order('id_faixa')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
 
     response = query.range(start, end).execute()
@@ -684,7 +684,7 @@ def get_tabua_projecoes():
         in: query
         type: integer
         required: false
-        default: 100
+        default: 1000
         description: Registros por página
     responses:
       200:
@@ -724,7 +724,7 @@ def get_tabua_projecoes():
     query = query.order('ano')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
 
     response = query.range(start, end).execute()
@@ -752,7 +752,7 @@ def get_metricas_erro():
         in: query
         type: integer
         required: false
-        default: 100
+        default: 1000
         description: Registros por página
     responses:
       200:
@@ -778,7 +778,7 @@ def get_metricas_erro():
     query = supabase.table('metricas_erro').select('*', count='exact')
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
 
     response = query.range(start, end).execute()
@@ -827,7 +827,7 @@ def get_nacoes_unidas():
         in: query
         type: integer
         required: false
-        default: 100
+        default: 1000
         description: Registros por página
     responses:
       200:
@@ -863,7 +863,7 @@ def get_nacoes_unidas():
     if faixa_etaria: query = query.eq('faixa_etaria', faixa_etaria)
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
+    per_page = request.args.get('per_page', 1000, type=int)
     start, end = get_pagination_params(page, per_page)
 
     response = query.range(start, end).execute()
