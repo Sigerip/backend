@@ -7,6 +7,8 @@ import os
 from datetime import datetime
 import secrets
 from functools import wraps
+from typing import Any
+
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from flask_limiter import Limiter
@@ -19,6 +21,9 @@ from agno.agent import Agent
 from agno.models.groq import Groq
 from agno.tools import tool
 from agno.models.openrouter import OpenRouter
+from openai import OpenAI
+
+from chat_context_builder import DEFAULT_MAX_CHARS, DEFAULT_MAX_ROWS, build_reduced_context
 
 # ============================================
 # CONFIGURAÇÕES INICIAIS
@@ -123,6 +128,36 @@ groq_client = Groq()
 genai.configure(api_key=chave_gemini)
 
 openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=openrouter_key,
+)
+
+
+def _limites_chat_seguros(limites: dict | None) -> tuple[int, int]:
+    """Evita payloads enormes; mantém faixa útil para o plano free."""
+    if not isinstance(limites, dict):
+        return DEFAULT_MAX_ROWS, DEFAULT_MAX_CHARS
+    try:
+        mr = int(limites.get("max_linhas", DEFAULT_MAX_ROWS))
+    except (TypeError, ValueError):
+        mr = DEFAULT_MAX_ROWS
+    try:
+        mc = int(limites.get("max_chars", DEFAULT_MAX_CHARS))
+    except (TypeError, ValueError):
+        mc = DEFAULT_MAX_CHARS
+    return min(400, max(15, mr)), min(48_000, max(1_500, mc))
+
+
+def _instrucoes_chat_compactas() -> str:
+    return dedent(
+        """\
+        Responda apenas com base no JSON em DADOS. Não use fatos externos.
+        Se algo não estiver no JSON, diga que não consta nos dados fornecidos.
+        Se os dados forem parciais (nota no JSON), avise quando a resposta depender disso.
+        Seja breve e preciso; não invente números ou categorias."""
+    )
 
 
 # ============================================
@@ -890,60 +925,53 @@ def get_nacoes_unidas():
 
 # --- CHATBOT IA ---
 
+def _parametros_corpo_chat(dados) -> tuple[str, Any, dict | None, tuple[int, int], bool]:
+    """mensagem, contexto, filtros_visíveis, (max_rows, max_chars), debug."""
+    mensagem = dados.get("mensagem", "") if isinstance(dados, dict) else str(dados)
+    contexto = dados.get("contexto", {}) if isinstance(dados, dict) else {}
+    filtros = None
+    if isinstance(dados, dict):
+        raw_f = dados.get("filtros_visiveis") or dados.get("filtros_ativos") or dados.get("filtros")
+        if isinstance(raw_f, dict):
+            filtros = raw_f
+    limites = dados.get("limites_chat") if isinstance(dados, dict) else None
+    mr, mc = _limites_chat_seguros(limites if isinstance(limites, dict) else None)
+    debug = bool(isinstance(dados, dict) and dados.get("debug_chat"))
+    return mensagem, contexto, filtros, (mr, mc), debug
+
+
 @app.route('/api/chat1', methods=['POST'])
 def chatbot():
     dados = request.get_json()
-    
-    # Extrai a mensagem e o contexto do JSON que o front-end simplificado está enviando
-    mensagem_usuario = dados.get('mensagem', '') if isinstance(dados, dict) else str(dados)
-    contexto_grafico = dados.get('contexto', {}) if isinstance(dados, dict) else {}
-    print(contexto_grafico)
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
     if not mensagem_usuario:
         return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
 
-    instrucoes = dedent("""\
-        Você é um experte em Demografia e Atuária e responderá perguntas somente relacionada aos dados que estão sendo passados para você.
-        Use apenas os dados fornecidos no contexto do gráfico para responder às perguntas. Se a pergunta estiver fora do escopo dos dados, responda que não tem informação suficiente.
-        Sempre responda de forma direta sem extrapolar ou inventar informações. Seja objetivo e conciso.
-
-        REGRAS:
-        - RESPONDA EM POUCAS PALAVRAS DE FORMA DIRETA.
-        - JAMAIS INVENTE ALGUMA INFORMAÇÃO OU ALUCINE COM ALGUMA INFORMAÇÃO QUE NÃO ESTEJA PRESENTE NO CONTEXTO. SE A PERGUNTA FOR SOBRE TENDÊNCIAS, RELAÇÕES ENTRE VARIÁVEIS OU QUALQUER ANÁLISE, RESPONDA APENAS COM BASE NOS DADOS DO CONTEXTO, SEM SUPOSIÇÕES EXTERNAS.
-        - SE A PERGUNTA FOR SOBRE DEFINIÇÕES, CONCEITOS OU QUALQUER ASSUNTO TEÓRICO, RESPONDA DE FORMA CONCISA E DIRETA, SEM EXTRAPOLAR PARA ASSUNTOS QUE NÃO ESTEJAM PRESENTES NO CONTEXTO. SE O ASSUNTO TEÓRICO NÃO ESTIVER CLARAMENTE EXPLICADO NO CONTEXTO, RESPONDA QUE NÃO TEM INFORMAÇÃO SUFICIENTE PARA RESPONDER.
-        - RESPONDA ESTRITAMENTE COM OS DADOS QUE RECEBEU NO PROMPT, SEJA DIRETO E NÃO EXPLIQUE A MENOS QUE SEJA PEDIDO.
-    """)
-
-    # Montamos um prompt final que une os dados do gráfico (contexto) com a pergunta do usuário
-    prompt_final = f"""
-    Baseado estritamente nos dados de contexto abaixo, responda à pergunta do usuário.
-
-    === DADOS DO GRÁFICO (CONTEXTO) ===
-    {json.dumps(contexto_grafico, ensure_ascii=False, indent=2)}
-
-    === PERGUNTA DO USUÁRIO ===
-    {mensagem_usuario}
-    """
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    prompt_final = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
 
     try:
         agent = Agent(
-            model=Groq(id="llama-3.3-70b-versatile"), # llama-3.3-70b-versatile, llama-3.1-8b-instant
+            model=Groq(id="llama-3.3-70b-versatile"),
             instructions=instrucoes,
             markdown=True,
         )
-        
-        print(prompt_final)
-        # Passamos o prompt combinado para a IA
         resposta_agente = agent.run(prompt_final)
-        
         texto_resposta = resposta_agente.content
-
-        # Prints para você ver no terminal do backend que a requisição chegou completa
-        print("--- NOVA REQUISIÇÃO DE CHAT ---")
-        print(f"Pergunta: {mensagem_usuario}")
-        print(f"Contexto recebido: Temos {len(str(contexto_grafico))} caracteres de dados.")
-        
-        return jsonify({"resposta": texto_resposta})
-        
+        print("--- CHAT1 ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
     except Exception as e:
         print(f"Erro na geração da IA: {e}")
         return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
@@ -952,136 +980,78 @@ def chatbot():
 @app.route('/api/chat2', methods=['POST'])
 def chatbot_openrouter():
     dados = request.get_json()
-    
-    # Extrai a mensagem e o contexto do JSON
-    mensagem_usuario = dados.get('mensagem', '') if isinstance(dados, dict) else str(dados)
-    contexto_grafico = dados.get('contexto', {}) if isinstance(dados, dict) else {}
-    
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
     if not mensagem_usuario:
         return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
 
-    instrucoes = dedent("""\
-        Você é um experte em Demografia e Atuária e responderá perguntas somente relacionada aos dados que estão sendo passados para você.
-        Use apenas os dados fornecidos no contexto do gráfico para responder às perguntas. Se a pergunta estiver fora do escopo dos dados, responda que não tem informação suficiente.
-        Sempre responda de forma direta sem extrapolar ou inventar informações. Seja objetivo e conciso.
-
-        REGRAS:
-        - RESPONDA EM POUCAS PALAVRAS DE FORMA DIRETA.
-        - JAMAIS INVENTE ALGUMA INFORMAÇÃO OU ALUCINE COM ALGUMA INFORMAÇÃO QUE NÃO ESTEJA PRESENTE NO CONTEXTO. SE A PERGUNTA FOR SOBRE TENDÊNCIAS, RELAÇÕES ENTRE VARIÁVEIS OU QUALQUER ANÁLISE, RESPONDA APENAS COM BASE NOS DADOS DO CONTEXTO, SEM SUPOSIÇÕES EXTERNAS.
-        - SE A PERGUNTA FOR SOBRE DEFINIÇÕES, CONCEITOS OU QUALQUER ASSUNTO TEÓRICO, RESPONDA DE FORMA CONCISA E DIRETA, SEM EXTRAPOLAR PARA ASSUNTOS QUE NÃO ESTEJAM PRESENTES NO CONTEXTO. SE O ASSUNTO TEÓRICO NÃO ESTIVER CLARAMENTE EXPLICADO NO CONTEXTO, RESPONDA QUE NÃO TEM INFORMAÇÃO SUFICIENTE PARA RESPONDER.
-        - RESPONDA ESTRITAMENTE COM OS DADOS QUE RECEBEU NO PROMPT, SEJA DIRETO E NÃO EXPLIQUE A MENOS QUE SEJA PEDIDO.
-    """)
-
-    # Montamos um prompt final
-    prompt_final = f"""
-    Baseado estritamente nos dados de contexto abaixo, responda à pergunta do usuário.
-
-    === DADOS DO GRÁFICO (CONTEXTO) ===
-    {json.dumps(contexto_grafico, ensure_ascii=False, indent=2)}
-
-    === PERGUNTA DO USUÁRIO ===
-    {mensagem_usuario}
-    """
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    prompt_final = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
 
     try:
-        # AQUI ESTÁ A PRINCIPAL MUDANÇA: Usando o OpenRouter
-        # Você pode trocar o "id" para qualquer modelo disponível no OpenRouter 
-        # Ex: "anthropic/claude-3.5-sonnet", "google/gemini-1.5-pro", etc.
         agent = Agent(
             model=OpenRouter(
-                id="openai/gpt-oss-120b:free", 
-                api_key=openrouter_key
+                id="openai/gpt-oss-120b:free",
+                api_key=openrouter_key,
             ),
             instructions=instrucoes,
             markdown=True,
         )
-        
-        # Passamos o prompt combinado para a IA
         resposta_agente = agent.run(prompt_final)
-        
         texto_resposta = resposta_agente.content
-
-        # Prints para debug no backend
-        print("--- NOVA REQUISIÇÃO DE CHAT (OPENROUTER) ---")
-        print(f"Pergunta: {mensagem_usuario}")
-        print(f"Contexto recebido: Temos {len(str(contexto_grafico))} caracteres de dados.")
-        
-        return jsonify({"resposta": texto_resposta})
-        
+        print("--- CHAT2 ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
     except Exception as e:
         print(f"Erro na geração da IA (OpenRouter): {e}")
         return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
 
-import os
-import json
-from textwrap import dedent
-from flask import request, jsonify
-from openai import OpenAI
-
-# Inicializa o cliente apontando para o OpenRouter
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ.get("OPENROUTER_API_KEY"),
-)
 
 @app.route('/api/chat', methods=['POST'])
 def chatbot_openrouter_direto():
     dados = request.get_json()
-    
-    # Extrai a mensagem e o contexto do JSON
-    mensagem_usuario = dados.get('mensagem', '') if isinstance(dados, dict) else str(dados)
-    contexto_grafico = dados.get('contexto', {}) if isinstance(dados, dict) else {}
-    
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
     if not mensagem_usuario:
         return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
 
-    # 1. O SYSTEM PROMPT (Regras de comportamento)
-    instrucoes = dedent("""\
-        Você é um experte em Demografia e Atuária e responderá perguntas somente relacionada aos dados que estão sendo passados para você.
-        Use apenas os dados fornecidos no contexto do gráfico para responder às perguntas. Se a pergunta estiver fora do escopo dos dados, responda que não tem informação suficiente.
-        Sempre responda de forma direta sem extrapolar ou inventar informações. Seja objetivo e conciso.
-
-        REGRAS:
-        - RESPONDA EM POUCAS PALAVRAS DE FORMA DIRETA.
-        - JAMAIS INVENTE ALGUMA INFORMAÇÃO OU ALUCINE COM ALGUMA INFORMAÇÃO QUE NÃO ESTEJA PRESENTE NO CONTEXTO.
-        - SE A PERGUNTA FOR SOBRE DEFINIÇÕES, CONCEITOS OU QUALQUER ASSUNTO TEÓRICO, RESPONDA DE FORMA CONCISA E DIRETA.
-        - RESPONDA ESTRITAMENTE COM OS DADOS QUE RECEBEU NO PROMPT, SEJA DIRETO E NÃO EXPLIQUE A MENOS QUE SEJA PEDIDO.
-    """)
-
-    # 2. O USER PROMPT (Dados + Pergunta)
-    conteudo_usuario = f"""
-    Baseado estritamente nos dados de contexto abaixo, responda à pergunta do usuário.
-
-    === DADOS DO GRÁFICO (CONTEXTO) ===
-    {json.dumps(contexto_grafico, ensure_ascii=False, indent=2)}
-
-    === PERGUNTA DO USUÁRIO ===
-    {mensagem_usuario}
-    """
-    print(conteudo_usuario)
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    conteudo_usuario = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
 
     try:
-        # 3. CHAMADA DA API (Passando os papéis)
-        resposta = client.chat.completions.create(
-            model="openai/gpt-oss-120b:free", # Coloque o modelo do OpenRouter aqui
+        resposta = openrouter_client.chat.completions.create(
+            model="openai/gpt-oss-120b:free",
             messages=[
                 {"role": "system", "content": instrucoes},
-                {"role": "user", "content": conteudo_usuario}
+                {"role": "user", "content": conteudo_usuario},
             ],
-            # Você também pode adicionar parâmetros opcionais aqui se quiser:
-            # temperature=0.1, # Menos criativo, mais focado nos dados
-            # max_tokens=500
+            temperature=0,
+            max_tokens=640,
         )
-        
-        # Acessando a resposta na estrutura do JSON retornado pela API
         texto_resposta = resposta.choices[0].message.content
-
-        print("--- NOVA REQUISIÇÃO DE CHAT (OPENROUTER DIRETO) ---")
-        print(f"Pergunta: {mensagem_usuario}")
-        print(f"Contexto recebido: Temos {len(str(contexto_grafico))} caracteres de dados.")
-        
-        return jsonify({"resposta": texto_resposta})
-        
+        print("--- CHAT ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
     except Exception as e:
         print(f"Erro na geração da IA (OpenRouter Direto): {e}")
         return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
