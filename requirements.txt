@@ -5,3 +5,8 @@ python-dotenv
 supabase
 Flask-Limiter
 SQLAlchemy
+agno
+ollama
+openai
+groq
+psycopg2-binary

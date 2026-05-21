@@ -1,3 +1,5 @@
+from textwrap import dedent
+
 from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 from flasgger import Swagger
@@ -5,11 +7,23 @@ import os
 from datetime import datetime
 import secrets
 from functools import wraps
+from typing import Any
+
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from envio import enviar_email_boas_vindas, reenviar_email_token
+from groq import Groq
+import google.generativeai as genai
+import json
+from agno.agent import Agent
+from agno.models.groq import Groq
+from agno.tools import tool
+from agno.models.openrouter import OpenRouter
+from openai import OpenAI
+
+from chat_context_builder import DEFAULT_MAX_CHARS, DEFAULT_MAX_ROWS, build_reduced_context
 
 # ============================================
 # CONFIGURAÇÕES INICIAIS
@@ -21,7 +35,7 @@ app = Flask(__name__)
 # Configuração de CORS
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001", "https://oiatuarial.vercel.app"],
+        "origins": ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8001", "https://oiatuarial.vercel.app", "https://frontend-3yhvd6mlf-oiatuarials-projects.vercel.app/"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
@@ -106,6 +120,45 @@ supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 url_tables = os.environ.get("TABLES")
+groq = os.environ.get("GROQ_API_KEY")
+chave_gemini = os.environ.get("GEMINI_API_KEY")
+supabase_uri = os.environ.get("SUPABASE_URI")
+
+groq_client = Groq()
+genai.configure(api_key=chave_gemini)
+
+openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=openrouter_key,
+)
+
+
+def _limites_chat_seguros(limites: dict | None) -> tuple[int, int]:
+    """Evita payloads enormes; mantém faixa útil para o plano free."""
+    if not isinstance(limites, dict):
+        return DEFAULT_MAX_ROWS, DEFAULT_MAX_CHARS
+    try:
+        mr = int(limites.get("max_linhas", DEFAULT_MAX_ROWS))
+    except (TypeError, ValueError):
+        mr = DEFAULT_MAX_ROWS
+    try:
+        mc = int(limites.get("max_chars", DEFAULT_MAX_CHARS))
+    except (TypeError, ValueError):
+        mc = DEFAULT_MAX_CHARS
+    return min(400, max(15, mr)), min(48_000, max(1_500, mc))
+
+
+def _instrucoes_chat_compactas() -> str:
+    return dedent(
+        """\
+        Responda apenas com base no JSON em DADOS. Não use fatos externos.
+        Se algo não estiver no JSON, diga que não consta nos dados fornecidos.
+        Se os dados forem parciais (nota no JSON), avise quando a resposta depender disso.
+        Seja breve e preciso; não invente números ou categorias."""
+    )
+
 
 # ============================================
 # FUNÇÕES AUXILIARES
@@ -868,6 +921,141 @@ def get_nacoes_unidas():
 
     response = query.range(start, end).execute()
     return jsonify(format_paginated_response(response, page, per_page))
+
+
+# --- CHATBOT IA ---
+
+def _parametros_corpo_chat(dados) -> tuple[str, Any, dict | None, tuple[int, int], bool]:
+    """mensagem, contexto, filtros_visíveis, (max_rows, max_chars), debug."""
+    mensagem = dados.get("mensagem", "") if isinstance(dados, dict) else str(dados)
+    contexto = dados.get("contexto", {}) if isinstance(dados, dict) else {}
+    filtros = None
+    if isinstance(dados, dict):
+        raw_f = dados.get("filtros_visiveis") or dados.get("filtros_ativos") or dados.get("filtros")
+        if isinstance(raw_f, dict):
+            filtros = raw_f
+    limites = dados.get("limites_chat") if isinstance(dados, dict) else None
+    mr, mc = _limites_chat_seguros(limites if isinstance(limites, dict) else None)
+    debug = bool(isinstance(dados, dict) and dados.get("debug_chat"))
+    return mensagem, contexto, filtros, (mr, mc), debug
+
+
+@app.route('/api/chat1', methods=['POST'])
+def chatbot():
+    dados = request.get_json()
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
+    if not mensagem_usuario:
+        return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
+
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    prompt_final = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
+
+    try:
+        agent = Agent(
+            model=Groq(id="llama-3.3-70b-versatile"),
+            instructions=instrucoes,
+            markdown=True,
+        )
+        resposta_agente = agent.run(prompt_final)
+        texto_resposta = resposta_agente.content
+        print("--- CHAT1 ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
+    except Exception as e:
+        print(f"Erro na geração da IA: {e}")
+        return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
+
+
+@app.route('/api/chat2', methods=['POST'])
+def chatbot_openrouter():
+    dados = request.get_json()
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
+    if not mensagem_usuario:
+        return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
+
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    prompt_final = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
+
+    try:
+        agent = Agent(
+            model=OpenRouter(
+                id="openai/gpt-oss-120b:free",
+                api_key=openrouter_key,
+            ),
+            instructions=instrucoes,
+            markdown=True,
+        )
+        resposta_agente = agent.run(prompt_final)
+        texto_resposta = resposta_agente.content
+        print("--- CHAT2 ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
+    except Exception as e:
+        print(f"Erro na geração da IA (OpenRouter): {e}")
+        return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
+
+
+@app.route('/api/chat', methods=['POST'])
+def chatbot_openrouter_direto():
+    dados = request.get_json()
+    mensagem_usuario, contexto_grafico, filtros_vis, (mr, mc), debug = _parametros_corpo_chat(dados)
+    if not mensagem_usuario:
+        return jsonify({"erro": "Nenhuma mensagem fornecida no JSON."}), 400
+
+    dados_compactos, meta_ctx = build_reduced_context(
+        mensagem_usuario,
+        contexto_grafico,
+        filtros_visiveis=filtros_vis,
+        max_rows=mr,
+        max_chars=mc,
+    )
+    instrucoes = _instrucoes_chat_compactas()
+    conteudo_usuario = (
+        f"DADOS (JSON compacto):\n{dados_compactos}\n\nPERGUNTA:\n{mensagem_usuario}"
+    )
+
+    try:
+        resposta = openrouter_client.chat.completions.create(
+            model="openai/gpt-oss-120b:free",
+            messages=[
+                {"role": "system", "content": instrucoes},
+                {"role": "user", "content": conteudo_usuario},
+            ],
+            temperature=0,
+            max_tokens=640,
+        )
+        texto_resposta = resposta.choices[0].message.content
+        print("--- CHAT ---", mensagem_usuario, "chars_ctx", meta_ctx.get("chars_enviados"))
+        out = {"resposta": texto_resposta}
+        if debug:
+            out["meta_contexto"] = meta_ctx
+        return jsonify(out)
+    except Exception as e:
+        print(f"Erro na geração da IA (OpenRouter Direto): {e}")
+        return jsonify({"erro": "Ocorreu um erro interno ao gerar a resposta da IA."}), 500
+
 
 # ============================================
 # EXECUÇÃO
