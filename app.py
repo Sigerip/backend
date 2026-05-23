@@ -15,7 +15,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from envio import enviar_email_boas_vindas, reenviar_email_token
 from groq import Groq
-import google.generativeai as genai
 import json
 from agno.agent import Agent
 from agno.models.groq import Groq
@@ -125,7 +124,6 @@ chave_gemini = os.environ.get("GEMINI_API_KEY")
 supabase_uri = os.environ.get("SUPABASE_URI")
 
 groq_client = Groq()
-genai.configure(api_key=chave_gemini)
 
 openrouter_key = os.environ.get("OPENROUTER_API_KEY")
 
