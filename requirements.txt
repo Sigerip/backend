@@ -10,3 +10,4 @@ ollama
 openai
 groq
 psycopg2-binary
+google-generativeai
